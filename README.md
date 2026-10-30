@@ -4,7 +4,7 @@ TypeScript MCP server for semantic and graph-aware retrieval from Obsidian Markd
 
 ## Setup
 
-Requires Node.js 20 or newer.
+Requires Node.js 24.15 or newer. The server uses Node's built-in SQLite module, so no native SQLite npm add-on is required. [Node.js documents `node:sqlite` as available from v22.5 and a release candidate from v24.15](https://nodejs.org/api/sqlite.html).
 
 ```powershell
 npm install
@@ -60,7 +60,7 @@ For a protected llama-server, add `"api_key": "..."` inside the `llamacpp` objec
 
 Environment variables remain supported and override matching values in `config.json`. Set `OBSIDIAN_RAG_CONFIG` to use a config file at a custom location. Common overrides include `OBSIDIAN_RAG_VAULT`, `OBSIDIAN_RAG_PROVIDER`, `OBSIDIAN_RAG_MODEL`, and `OBSIDIAN_RAG_LLAMACPP_URL`.
 
-The first index can be built with the CLI or by calling the MCP `reindex` tool. Index data is kept locally in `data/obsidian_notes.json` by default; override this directory with `OBSIDIAN_RAG_DATA`. Chunk length defaults to 1,500 characters for other models; `nomic-embed-text-v2-moe` is capped at 512. The Python implementation's 1,500-token setting applies to v1 models with a larger context, not v2 moe. Short chunks are indexed by default; set `OBSIDIAN_RAG_MIN_CHARACTERS_PER_CHUNK` to raise the minimum length if desired.
+The first index can be built with the CLI or by calling the MCP `reindex` tool. Chunks, metadata, links, and float32 embeddings are kept in `obsidian_notes.db` under the configured data directory. If `obsidian_notes.json` from an older version is present, it is imported into SQLite on first launch. Searches stream stored vectors from SQLite and keep only the best matches in memory, so RAM use no longer grows with the entire embedding collection. Search uses exact cosine ranking over disk-backed rows; query time increases with corpus size. Chunk length defaults to 1,500 characters for other models; `nomic-embed-text-v2-moe` is capped at 512. The Python implementation's 1,500-token setting applies to v1 models with a larger context, not v2 moe. Short chunks are indexed by default; set `OBSIDIAN_RAG_MIN_CHARACTERS_PER_CHUNK` to raise the minimum length if desired.
 
 ## Command line
 
@@ -93,7 +93,7 @@ Run the CLI integration test suite with:
 npm test
 ```
 
-The test creates a temporary vault and local fake embeddings endpoint. It exercises indexing, search, similar-note lookup, note content, graph traversal, stats, and index removal without requiring a running llama-server or API key.
+The tests create a temporary vault and local fake embeddings endpoint. They exercise indexing, search, similar-note lookup, note content, graph traversal, stats, index removal, and migration from the previous JSON index without requiring a running llama-server or API key.
 
 `index --clear` clears the existing index before rebuilding it. Invoke this option directly through Node (`node .\dist\cli.js index --clear`) so npm does not parse `--clear` as one of its own options. Avoid combining `--clear` with a single-file path unless you intend to clear the rest of the index.
 
@@ -124,4 +124,4 @@ Example MCP client configuration:
 }
 ```
 
-This initial TypeScript implementation stores vectors as JSON and performs exact cosine search in-process. It supports OpenAI-compatible embeddings, llama.cpp `llama-server`, and Ollama's `/api/embed` endpoint. Configure indexing and search with MCP tools after connecting.
+The server stores vectors in a local SQLite database and performs bounded-memory exact cosine search. It supports OpenAI-compatible embeddings, llama.cpp `llama-server`, and Ollama's `/api/embed` endpoint. Configure indexing and search with MCP tools after connecting.

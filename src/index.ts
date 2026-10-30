@@ -6,19 +6,14 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { settings } from "./config.js";
+import { SqliteStore, type StoredChunk } from "./store.js";
 
-type Chunk = { id: string; file_path: string; heading: string | null; heading_level: number; type: string; tags: string; content: string; embedding: number[] };
-type State = { chunks: Chunk[]; links: Record<string, string[]> };
 const vault = settings.vaultPath;
 const dataDir = settings.dataPath;
-const dbFile = path.join(dataDir, "obsidian_notes.json");
 const { provider, model, baseUrl, apiKey, maxChunk, minChunkCharacters } = settings;
 const loadedModels = new Set<string>();
-let state: State = { chunks: [], links: {} };
 await fs.mkdir(dataDir, { recursive: true });
-try { state = JSON.parse(await fs.readFile(dbFile, "utf8")) as State; } catch { /* first run */ }
-
-async function persist() { const tmp = `${dbFile}.tmp`; await fs.writeFile(tmp, JSON.stringify(state)); await fs.rename(tmp, dbFile); }
+const store = new SqliteStore(dataDir);
 function embeddingPrefix(taskType: "search_document" | "search_query") {
   const name = model.toLowerCase();
   if (name.includes("nomic")) return `${taskType}: `;
@@ -49,7 +44,6 @@ async function embed(text: string, taskType: "search_document" | "search_query" 
   if (!vector?.length) throw new Error("Embedding response did not contain a vector");
   return vector;
 }
-function cosine(a: number[], b: number[]) { let dot=0, aa=0, bb=0; for(let i=0;i<Math.min(a.length,b.length);i++){dot+=a[i]*b[i];aa+=a[i]*a[i];bb+=b[i]*b[i];} return aa&&bb?dot/Math.sqrt(aa*bb):0; }
 function splitChunks(body: string) {
   const blocks = body.split(/(?=^#{1,6}\s)/m); const result: { heading: string|null; level: number; text: string }[] = [];
   for (const block of blocks) { const m = block.match(/^(#{1,6})\s+(.+?)\s*$/m); const heading=m?.[2]??null, level=m?.[1]?.length??0; const clean=block.trim(); if(!clean) continue;
@@ -60,16 +54,75 @@ function splitChunks(body: string) {
 async function markdownFiles(dir: string): Promise<string[]> { const out:string[]=[]; const excluded=new Set([".git",".obsidian",".trash","attachments","node_modules","dist","coverage"]); for(const ent of await fs.readdir(dir,{withFileTypes:true})){if(excluded.has(ent.name)||ent.name.startsWith("."))continue;const full=path.join(dir,ent.name);if(ent.isDirectory())out.push(...await markdownFiles(full));else if(ent.isFile()&&ent.name.toLowerCase().endsWith(".md"))out.push(full);}return out; }
 const wikiRe=/\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]/g;
 function makeResolver(files:string[]){const names=new Map<string,string[]>();for(const f of files){const rel=path.relative(vault,f).replaceAll("\\","/");const base=path.basename(rel,".md");names.set(base,[...(names.get(base)??[]),rel]);}return (target:string)=>{const normalized=target.trim().replaceAll("\\","/").replace(/\.md$/i,"");const exact=files.map(f=>path.relative(vault,f).replaceAll("\\","/")).find(x=>x.replace(/\.md$/i,"")===normalized);return exact??names.get(path.basename(normalized))?.sort((a,b)=>a.length-b.length)[0];};}
-async function reindex(clear:boolean,pathFilter?:string){const files=await markdownFiles(vault);const selected=files.filter(f=>!pathFilter||path.relative(vault,f).replaceAll("\\","/").startsWith(pathFilter));if(clear){state.chunks=[];state.links={};}const resolve=makeResolver(files);let indexed=0,created=0;const errors:{file:string;error:string}[]=[];
- for(const file of selected){const rel=path.relative(vault,file).replaceAll("\\","/");try{let raw=await fs.readFile(file,"utf8");raw=raw.replace(/^---\r?\n[\s\S]*?\r?\n---\s*/,"" ).trim();const tags=[...raw.matchAll(/(?:^|\s)#([\w/-]+)/g)].map(m=>m[1]);state.chunks=state.chunks.filter(c=>c.file_path!==rel);for(const part of splitChunks(raw)){if(part.text.length<minChunkCharacters)continue;const vector=await embed(part.text);const id=createHash("sha1").update(`${rel}\0${part.heading}\0${part.text}`).digest("hex");state.chunks.push({id,file_path:rel,heading:part.heading,heading_level:part.level,type:rel.startsWith("Daily Notes/")?"daily":"note",tags:[...new Set(tags)].join(","),content:part.text,embedding:vector});created++;}const links=new Set<string>();for(const match of raw.matchAll(wikiRe)){const target=resolve(match[1]);if(target&&target!==rel)links.add(target);}state.links[rel]=[...links].sort();indexed++;}catch(e){errors.push({file:rel,error:String(e)});} }
- await persist();return{files_indexed:indexed,chunks_created:created,link_edges:Object.values(state.links).reduce((n,x)=>n+x.length,0),total_in_store:state.chunks.length,errors:errors.length?errors:null,path_filter:pathFilter??null,cleared:clear}; }
-function neighbors(seeds:string[],hops:number,limit:number){const seen=new Set(seeds),queue=seeds.map(path=>({path,depth:0})),out:{path:string;hop:number;via:string;direction:string}[]=[];while(queue.length&&out.length<limit){const cur=queue.shift()!;if(cur.depth>=hops)continue;const outgoing=state.links[cur.path]??[];const incoming=Object.entries(state.links).filter(([,targets])=>targets.includes(cur.path)).map(([source])=>source);for(const [list,direction] of [[outgoing,"link"],[incoming,"backlink"]] as const)for(const target of list.sort()){if(seen.has(target))continue;seen.add(target);out.push({path:target,hop:cur.depth+1,via:cur.path,direction});queue.push({path:target,depth:cur.depth+1});if(out.length>=limit)return out;}}return out;}
+async function reindex(clear: boolean, pathFilter?: string) {
+  const files = await markdownFiles(vault);
+  const selected = files.filter((file) => !pathFilter || path.relative(vault, file).replaceAll("\\", "/").startsWith(pathFilter));
+  if (clear) store.clear();
+  const resolve = makeResolver(files);
+  let indexed = 0, created = 0;
+  const errors: { file: string; error: string }[] = [];
+  for (const file of selected) {
+    const rel = path.relative(vault, file).replaceAll("\\", "/");
+    try {
+      let raw = await fs.readFile(file, "utf8");
+      raw = raw.replace(/^---\r?\n[\s\S]*?\r?\n---\s*/, "").trim();
+      const tags = [...raw.matchAll(/(?:^|\s)#([\w/-]+)/g)].map((match) => match[1]);
+      store.deleteFile(rel);
+      store.ensureNote(rel);
+      for (const part of splitChunks(raw)) {
+        if (part.text.length < minChunkCharacters) continue;
+        const vector = await embed(part.text);
+        const chunk: StoredChunk = {
+          id: createHash("sha1").update(`${rel}\0${part.heading}\0${part.text}`).digest("hex"),
+          file_path: rel,
+          heading: part.heading,
+          heading_level: part.level,
+          type: rel.startsWith("Daily Notes/") ? "daily" : "note",
+          tags: [...new Set(tags)].join(","),
+          content: part.text,
+          embedding: vector,
+        };
+        store.insert(chunk);
+        created++;
+      }
+      const links = new Set<string>();
+      for (const match of raw.matchAll(wikiRe)) {
+        const target = resolve(match[1]);
+        if (target && target !== rel) links.add(target);
+      }
+      store.replaceLinks(rel, [...links].sort());
+      indexed++;
+    } catch (error) { errors.push({ file: rel, error: String(error) }); }
+  }
+  const totals = store.stats();
+  return { files_indexed: indexed, chunks_created: created, link_edges: totals.links, total_in_store: totals.chunks, errors: errors.length ? errors : null, path_filter: pathFilter ?? null, cleared: clear };
+}
+
+function neighbors(seedPaths: string[], hops: number, limit: number) {
+  const seen = new Set(seedPaths);
+  const queue = seedPaths.map((notePath) => ({ path: notePath, depth: 0 }));
+  const out: { path: string; hop: number; via: string; direction: string }[] = [];
+  while (queue.length && out.length < limit) {
+    const current = queue.shift()!;
+    if (current.depth >= hops) continue;
+    for (const [list, direction] of [[store.getLinks(current.path), "link"], [store.getBacklinks(current.path), "backlink"]] as const) {
+      for (const target of list) {
+        if (seen.has(target)) continue;
+        seen.add(target);
+        out.push({ path: target, hop: current.depth + 1, via: current.path, direction });
+        queue.push({ path: target, depth: current.depth + 1 });
+        if (out.length >= limit) return out;
+      }
+    }
+  }
+  return out;
+}
 const server=new McpServer({name:"obsidian-rag-mcp",version:"1.0.0"});
-server.registerTool("search_notes",{description:"Search Obsidian notes by semantic similarity; optionally expand through linked notes.",inputSchema:{query:z.string(),limit:z.number().int().min(1).max(100).optional(),note_type:z.string().optional(),expand:z.number().int().min(0).max(5).default(0)}},async({query,limit=10,note_type,expand})=>{const q=await embed(query,"search_query");const matches=state.chunks.filter(c=>!note_type||c.type===note_type).map(c=>({c,similarity:cosine(q,c.embedding)})).sort((a,b)=>b.similarity-a.similarity).filter(x=>x.similarity>=(settings.similarityThreshold)).slice(0,limit);const results: Array<{file_path:string;heading?:string|null;content:string;similarity?:number;type?:string;source?:string;hop?:number;via?:string;direction?:string}>=matches.map(({c,similarity})=>({file_path:c.file_path,heading:c.heading,content:c.content.slice(0,500),similarity:Number(similarity.toFixed(3)),type:c.type}));if(expand&&results.length)for(const n of neighbors([...new Set(results.map(x=>x.file_path))],expand,limit*2)){const c=state.chunks.find(x=>x.file_path===n.path);results.push({file_path:n.path,content:c?.content.slice(0,500)??"",source:"graph",hop:n.hop,via:n.via,direction:n.direction});}return{content:[{type:"text",text:JSON.stringify(results)}]};});
-server.registerTool("get_similar",{description:"Find semantically similar notes to a vault-relative note path.",inputSchema:{note_path:z.string(),limit:z.number().int().min(1).max(100).default(5)}},async({note_path,limit})=>{const chunks=state.chunks.filter(c=>c.file_path===note_path);if(!chunks.length)return{content:[{type:"text",text:JSON.stringify({error:`Note not found: ${note_path}`})}]};const q=await embed(chunks.map(c=>c.content).join("\n\n").slice(0,8000));const results=state.chunks.filter(c=>c.file_path!==note_path).map(c=>({c,similarity:cosine(q,c.embedding)})).sort((a,b)=>b.similarity-a.similarity).slice(0,limit).map(({c,similarity})=>({file_path:c.file_path,heading:c.heading,preview:c.content.slice(0,200),similarity:Number(similarity.toFixed(3))}));return{content:[{type:"text",text:JSON.stringify(results)}]};});
-server.registerTool("get_note_context",{description:"Get full note content, links, backlinks, and related notes.",inputSchema:{note_path:z.string(),limit:z.number().int().min(1).max(100).default(5)}},async({note_path,limit})=>{const chunks=state.chunks.filter(c=>c.file_path===note_path);if(!chunks.length)return{content:[{type:"text",text:JSON.stringify({error:`Note not found: ${note_path}`})}]};const related=state.chunks.filter(c=>c.file_path!==note_path).map(c=>({c,score:cosine(chunks[0].embedding,c.embedding)})).sort((a,b)=>b.score-a.score).slice(0,limit).map(x=>({file_path:x.c.file_path,heading:x.c.heading,similarity:Number(x.score.toFixed(3))}));return{content:[{type:"text",text:JSON.stringify({file_path:note_path,content:chunks.map(c=>c.content).join("\n\n"),links:state.links[note_path]??[],backlinks:Object.entries(state.links).filter(([,v])=>v.includes(note_path)).map(([k])=>k),similar_notes:related})}]};});
-server.registerTool("get_note_graph",{description:"Get outgoing links, backlinks, and graph neighbors of a note.",inputSchema:{note_path:z.string(),hops:z.number().int().min(1).max(5).default(1),limit:z.number().int().min(1).max(100).default(20)}},async({note_path,hops,limit})=>{if(!state.chunks.some(c=>c.file_path===note_path)&&!state.links[note_path])return{content:[{type:"text",text:JSON.stringify({error:`Note not found: ${note_path}`})}]};return{content:[{type:"text",text:JSON.stringify({file_path:note_path,links:state.links[note_path]??[],backlinks:Object.entries(state.links).filter(([,v])=>v.includes(note_path)).map(([k])=>k),beyond_one_hop:hops>1?neighbors([note_path],hops,limit).filter(n=>n.hop>1):[]})}]};});
-server.registerTool("get_stats",{description:"Show indexed chunk, note, and graph statistics.",inputSchema:{}},async()=>({content:[{type:"text",text:JSON.stringify({collection:"obsidian_notes",count:state.chunks.length,notes:new Set(state.chunks.map(c=>c.file_path)).size,link_edges:Object.values(state.links).reduce((n,x)=>n+x.length,0),config_path:settings.configPath,data_path:dbFile,vault_path:vault,provider,model})}]}));
+server.registerTool("search_notes",{description:"Search Obsidian notes by semantic similarity; optionally expand through linked notes.",inputSchema:{query:z.string(),limit:z.number().int().min(1).max(100).optional(),note_type:z.string().optional(),expand:z.number().int().min(0).max(5).default(0)}},async({query,limit=10,note_type,expand})=>{const q=await embed(query,"search_query");const matches=store.search(q,limit,note_type).filter(x=>x.similarity>=settings.similarityThreshold);const results: Array<{file_path:string;heading?:string|null;content:string;similarity?:number;type?:string;source?:string;hop?:number;via?:string;direction?:string}>=matches.map(({chunk,similarity})=>({file_path:chunk.file_path,heading:chunk.heading,content:chunk.content.slice(0,500),similarity:Number(similarity.toFixed(3)),type:chunk.type}));if(expand&&results.length)for(const n of neighbors([...new Set(results.map(x=>x.file_path))],expand,limit*2)){const preview=store.getPreview(n.path,500);results.push({file_path:n.path,content:preview,source:"graph",hop:n.hop,via:n.via,direction:n.direction});}return{content:[{type:"text",text:JSON.stringify(results)}]};});
+server.registerTool("get_similar",{description:"Find semantically similar notes to a vault-relative note path.",inputSchema:{note_path:z.string(),limit:z.number().int().min(1).max(100).default(5)}},async({note_path,limit})=>{if(!store.hasNote(note_path))return{content:[{type:"text",text:JSON.stringify({error:`Note not found: ${note_path}`})}]};const q=await embed(store.getEmbeddingText(note_path,8000));const results=store.search(q,limit+10,undefined,note_path).slice(0,limit).map(({chunk,similarity})=>({file_path:chunk.file_path,heading:chunk.heading,preview:chunk.content.slice(0,200),similarity:Number(similarity.toFixed(3))}));return{content:[{type:"text",text:JSON.stringify(results)}]};});
+server.registerTool("get_note_context",{description:"Get full note content, links, backlinks, and related notes.",inputSchema:{note_path:z.string(),limit:z.number().int().min(1).max(100).default(5)}},async({note_path,limit})=>{if(!store.hasNote(note_path))return{content:[{type:"text",text:JSON.stringify({error:`Note not found: ${note_path}`})}]};const embedding=store.getFirstEmbedding(note_path);const related=embedding?store.search(embedding,limit,undefined,note_path).map(({chunk,similarity})=>({file_path:chunk.file_path,heading:chunk.heading,similarity:Number(similarity.toFixed(3))})):[];return{content:[{type:"text",text:JSON.stringify({file_path:note_path,content:store.getContents(note_path).join("\n\n"),links:store.getLinks(note_path),backlinks:store.getBacklinks(note_path),similar_notes:related})}]};});
+server.registerTool("get_note_graph",{description:"Get outgoing links, backlinks, and graph neighbors of a note.",inputSchema:{note_path:z.string(),hops:z.number().int().min(1).max(5).default(1),limit:z.number().int().min(1).max(100).default(20)}},async({note_path,hops,limit})=>{if(!store.hasNote(note_path))return{content:[{type:"text",text:JSON.stringify({error:`Note not found: ${note_path}`})}]};return{content:[{type:"text",text:JSON.stringify({file_path:note_path,links:store.getLinks(note_path),backlinks:store.getBacklinks(note_path),beyond_one_hop:hops>1?neighbors([note_path],hops,limit).filter(n=>n.hop>1):[]})}]};});
+server.registerTool("get_stats",{description:"Show indexed chunk, note, and graph statistics.",inputSchema:{}},async()=>{const totals=store.stats();return{content:[{type:"text",text:JSON.stringify({collection:"obsidian_notes",count:totals.chunks,notes:totals.notes,link_edges:totals.links,config_path:settings.configPath,data_path:path.join(dataDir,"obsidian_notes.db"),vault_path:vault,provider,model})}]};});
 server.registerTool("reindex",{description:"Index or refresh Markdown notes and their Obsidian wikilink graph.",inputSchema:{clear:z.boolean().default(false),path_filter:z.string().optional()}},async({clear,path_filter})=>({content:[{type:"text",text:JSON.stringify(await reindex(clear,path_filter))}]}));
-server.registerTool("remove_note",{description:"Remove a deleted Markdown note and its related link edges from the local index.",inputSchema:{note_path:z.string()}},async({note_path})=>{const before=state.chunks.length;state.chunks=state.chunks.filter(chunk=>chunk.file_path!==note_path);delete state.links[note_path];for(const [source,targets] of Object.entries(state.links))state.links[source]=targets.filter(target=>target!==note_path);await persist();return{content:[{type:"text",text:JSON.stringify({file_path:note_path,chunks_removed:before-state.chunks.length})}]};});
+server.registerTool("remove_note",{description:"Remove a deleted Markdown note and its related link edges from the local index.",inputSchema:{note_path:z.string()}},async({note_path})=>{const chunksRemoved=store.removeNote(note_path);return{content:[{type:"text",text:JSON.stringify({file_path:note_path,chunks_removed:chunksRemoved})}]};});
 const transport=new StdioServerTransport();await server.connect(transport);

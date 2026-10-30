@@ -97,3 +97,27 @@ test("CLI indexes, searches, explores, reports stats, and removes notes", async 
   const graphAfterRemove = await runCli("graph", "notes/Alpha.md");
   assert.deepEqual(graphAfterRemove.links, []);
 });
+
+test("imports the previous JSON index into SQLite once", async (t) => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "obsidian-rag-mcp-migration-test-"));
+  t.after(async () => rm(tempDir, { recursive: true, force: true }));
+  const vault = path.join(tempDir, "vault");
+  const data = path.join(tempDir, "data");
+  const configPath = path.join(tempDir, "config.json");
+  await mkdir(vault, { recursive: true });
+  await mkdir(data, { recursive: true });
+  await writeFile(configPath, JSON.stringify({ vault_path: vault, data_path: data, provider: "llamacpp" }));
+  await writeFile(path.join(data, "obsidian_notes.json"), JSON.stringify({
+    chunks: [{ id: "legacy-1", file_path: "Old.md", heading: null, heading_level: 0, type: "note", tags: "", content: "Legacy note", embedding: [1, 0, 0] }],
+    links: { "Old.md": ["Linked.md"] },
+  }));
+  const env = { ...process.env, OBSIDIAN_RAG_CONFIG: configPath };
+  for (const key of Object.keys(env)) if (key.startsWith("OBSIDIAN_RAG_") && key !== "OBSIDIAN_RAG_CONFIG") delete env[key];
+  delete env.OPENAI_API_KEY;
+  const result = await execFileAsync(process.execPath, [cliPath, "stats"], { cwd: projectDir, env, encoding: "utf8", timeout: 15_000 });
+  const stats = JSON.parse(result.stdout.trim());
+  assert.equal(stats.count, 1);
+  assert.equal(stats.notes, 2);
+  assert.equal(stats.link_edges, 1);
+  assert.equal(path.basename(stats.data_path), "obsidian_notes.db");
+});
