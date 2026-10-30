@@ -13,24 +13,41 @@ const usage = `obsidian-rag <command>
 Commands:
   index [file.md] [--clear]   Index the vault or refresh one vault-relative Markdown file
   search <query> [-n limit]   Search indexed notes by semantic similarity
+  similar <file.md> [-n limit] Find notes similar to a vault note
+  content <file.md> [-n limit] Get note content, links, backlinks, and similar notes
+  graph <file.md> [--hops N]  Show links, backlinks, and graph neighbors
+  stats                       Show index and configuration statistics
+  remove <file.md>            Remove a note from the index
   watch [--debounce seconds]  Watch the vault and index Markdown file changes
 
 Environment: OBSIDIAN_RAG_VAULT, OBSIDIAN_RAG_PROVIDER, OBSIDIAN_RAG_MODEL,
              OBSIDIAN_RAG_LLAMACPP_URL, OBSIDIAN_RAG_LLAMACPP_API_KEY`;
 
-function parseLimit(args: string[]) {
+function parseLimit(args: string[], fallback = 10) {
   const i = args.findIndex((arg) => arg === "-n" || arg === "--limit");
-  if (i < 0) return 10;
+  if (i < 0) return fallback;
   const limit = Number(args[i + 1]);
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("Search limit must be an integer from 1 to 100");
   args.splice(i, 2);
   return limit;
 }
 
+function vaultRelative(file: string) {
+  const vault = settings.vaultPath;
+  const requested = path.resolve(vault, file);
+  const relative = path.relative(vault, requested);
+  if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error("The file must be inside the configured vault");
+  }
+  if (!requested.toLowerCase().endsWith(".md")) throw new Error("Only Markdown (.md) paths are supported");
+  return relative.replaceAll("\\", "/");
+}
+
 async function main() {
   const [command, ...args] = process.argv.slice(2);
   if (!command || command === "--help" || command === "-h") { console.log(usage); return; }
-  if (command !== "index" && command !== "search" && command !== "watch") throw new Error(`Unknown command: ${command}\n\n${usage}`);
+  const supported = ["index", "search", "similar", "content", "graph", "stats", "remove", "watch"];
+  if (!supported.includes(command)) throw new Error(`Unknown command: ${command}\n\n${usage}`);
 
   let toolName: string;
   let toolArgs: Record<string, unknown>;
@@ -40,24 +57,48 @@ async function main() {
     if (targets.length > 1) throw new Error("Specify at most one Markdown file to index");
     let path_filter: string | undefined;
     if (targets[0]) {
-      const vault = settings.vaultPath;
-      const requested = path.resolve(vault, targets[0]);
-      const relative = path.relative(vault, requested);
-      if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-        throw new Error("The file must be inside OBSIDIAN_RAG_VAULT");
-      }
-      if (!requested.toLowerCase().endsWith(".md")) throw new Error("Only Markdown (.md) files can be indexed");
+      const relative = vaultRelative(targets[0]);
+      const requested = path.join(settings.vaultPath, relative);
       if (!(await stat(requested)).isFile()) throw new Error("The specified path is not a file");
-      path_filter = relative.replaceAll("\\", "/");
+      path_filter = relative;
     }
     toolName = "reindex";
     toolArgs = { clear, ...(path_filter ? { path_filter } : {}) };
   } else if (command === "search") {
-    const limit = parseLimit(args);
+    const limit = parseLimit(args, 10);
     const query = args.join(" ").trim();
     if (!query) throw new Error("Provide a search query.\n\nUsage: obsidian-rag search <query> [-n limit]");
     toolName = "search_notes";
     toolArgs = { query, limit };
+  } else if (command === "similar" || command === "content") {
+    const limit = parseLimit(args, 5);
+    const note = args.shift();
+    if (!note || args.length) throw new Error(`Usage: obsidian-rag ${command} <file.md> [-n limit]`);
+    const note_path = vaultRelative(note);
+    toolName = command === "similar" ? "get_similar" : "get_note_context";
+    toolArgs = { note_path, limit };
+  } else if (command === "graph") {
+    const limit = parseLimit(args, 20);
+    const hopsAt = args.findIndex((arg) => arg === "--hops");
+    let hops = 1;
+    if (hopsAt >= 0) {
+      hops = Number(args[hopsAt + 1]);
+      args.splice(hopsAt, 2);
+      if (!Number.isInteger(hops) || hops < 1 || hops > 5) throw new Error("Graph hops must be an integer from 1 to 5");
+    }
+    const note = args.shift();
+    if (!note || args.length) throw new Error("Usage: obsidian-rag graph <file.md> [--hops N] [-n limit]");
+    toolName = "get_note_graph";
+    toolArgs = { note_path: vaultRelative(note), hops, limit };
+  } else if (command === "remove") {
+    const note = args.shift();
+    if (!note || args.length) throw new Error("Usage: obsidian-rag remove <file.md>");
+    toolName = "remove_note";
+    toolArgs = { note_path: vaultRelative(note) };
+  } else if (command === "stats") {
+    if (args.length) throw new Error("Usage: obsidian-rag stats");
+    toolName = "get_stats";
+    toolArgs = {};
   } else {
     toolName = "watch";
     toolArgs = {};

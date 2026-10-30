@@ -76,7 +76,14 @@ To add or refresh one file, pass its path relative to the vault. The file must b
 
 ```powershell
 node .\dist\cli.js index 'Projects/Architecture.md'
+node .\dist\cli.js similar 'Projects/Architecture.md' -n 5
+node .\dist\cli.js content 'Projects/Architecture.md'
+node .\dist\cli.js graph 'Projects/Architecture.md' --hops 2
+node .\dist\cli.js stats
+node .\dist\cli.js remove 'Projects/OldNote.md'
 ```
+
+`content` returns the note body, links, backlinks, and similar notes. `remove` removes a note from the RAG index only; it does not delete the Markdown file from the vault. Paths are relative to the configured vault.
 
 `index --clear` clears the existing index before rebuilding it. Invoke this option directly through Node (`node .\dist\cli.js index --clear`) so npm does not parse `--clear` as one of its own options. Avoid combining `--clear` with a single-file path unless you intend to clear the rest of the index.
 
