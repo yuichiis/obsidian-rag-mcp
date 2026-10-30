@@ -85,6 +85,16 @@ node .\dist\cli.js remove 'Projects/OldNote.md'
 
 `content` returns the note body, links, backlinks, and similar notes. `remove` removes a note from the RAG index only; it does not delete the Markdown file from the vault. Paths are relative to the configured vault.
 
+## Tests
+
+Run the CLI integration test suite with:
+
+```powershell
+npm test
+```
+
+The test creates a temporary vault and local fake embeddings endpoint. It exercises indexing, search, similar-note lookup, note content, graph traversal, stats, and index removal without requiring a running llama-server or API key.
+
 `index --clear` clears the existing index before rebuilding it. Invoke this option directly through Node (`node .\dist\cli.js index --clear`) so npm does not parse `--clear` as one of its own options. Avoid combining `--clear` with a single-file path unless you intend to clear the rest of the index.
 
 To keep the index updated as notes are added, edited, renamed, or deleted, run the watcher in a terminal:
