@@ -30,7 +30,7 @@ function readConfig(): JsonConfig {
   try { return JSON.parse(readFileSync(configPath(), "utf8")) as JsonConfig; }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
-    throw new Error(`Could not read config file ${configPath()}: ${String(error)}`);
+    throw new Error(`Could not read config file ${configPath()}: ${String(error)}`, { cause: error });
   }
 }
 

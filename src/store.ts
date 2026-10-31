@@ -97,7 +97,7 @@ export class SqliteStore {
         this.db.exec("COMMIT");
       } catch (error) {
         this.db.exec("ROLLBACK");
-        throw new Error(`Could not migrate legacy JSON index ${legacyPath}: ${String(error)}`);
+        throw new Error(`Could not migrate legacy JSON index ${legacyPath}: ${String(error)}`, { cause: error });
       }
     } else transaction.run();
   }
