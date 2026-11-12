@@ -6,43 +6,22 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { settings } from "./config.js";
+import { createEmbedder } from "./embedder.js";
 import { SqliteStore, type StoredChunk } from "./store.js";
 
 const vault = settings.vaultPath;
 const dataDir = settings.dataPath;
 const { provider, model, baseUrl, apiKey, maxChunk, minChunkCharacters } = settings;
-const loadedModels = new Set<string>();
+const embedder = createEmbedder({ provider, model, baseUrl, apiKey });
+const EMBED_BATCH_SIZE = 16;
 await fs.mkdir(dataDir, { recursive: true });
 const store = new SqliteStore(dataDir);
-function embeddingPrefix(taskType: "search_document" | "search_query") {
-  const name = model.toLowerCase();
-  if (name.includes("nomic")) return `${taskType}: `;
-  if (name.includes("qwen") && taskType === "search_query") return "Query: ";
-  return "";
-}
-async function ensureLlamaModelLoaded() {
-  if (provider !== "llamacpp" || !model || model === "default" || loadedModels.has(model)) return;
-  loadedModels.add(model);
-  const headers: Record<string, string> = { "content-type": "application/json" };
-  if (apiKey) headers.authorization = `Bearer ${apiKey}`;
-  try {
-    await fetch(`${baseUrl}/models/load`, { method: "POST", headers, body: JSON.stringify({ model }), signal: AbortSignal.timeout(300_000) });
-  } catch { /* Older/single-model servers lack this endpoint; embeddings can auto-load. */ }
-}
-async function embed(text: string, taskType: "search_document" | "search_query" = "search_document"): Promise<number[]> {
-  const llamacpp = provider === "llamacpp";
-  const ollama = provider === "ollama";
-  const url = ollama ? `${baseUrl}/api/embed` : `${baseUrl}/v1/embeddings`;
-  const headers: Record<string, string> = { "content-type": "application/json" };
-  if (apiKey) headers.authorization = `Bearer ${apiKey}`;
-  if (llamacpp) await ensureLlamaModelLoaded();
-  const input = `${llamacpp ? embeddingPrefix(taskType) : ""}${text}`;
-  const response = await fetch(url, { method: "POST", headers, body: JSON.stringify({ model, input }), ...(llamacpp ? { signal: AbortSignal.timeout(300_000) } : {}) });
-  if (!response.ok) throw new Error(`Embedding API ${response.status}: ${await response.text()}`);
-  const data = await response.json() as { data?: { embedding: number[] }[]; embeddings?: number[][] };
-  const vector = data.data?.[0]?.embedding ?? data.embeddings?.[0];
-  if (!vector?.length) throw new Error("Embedding response did not contain a vector");
-  return vector;
+async function embedInBatches(texts: string[]): Promise<number[][]> {
+  const vectors: number[][] = [];
+  for (let i = 0; i < texts.length; i += EMBED_BATCH_SIZE) {
+    vectors.push(...await embedder.embedBatch(texts.slice(i, i + EMBED_BATCH_SIZE), "search_document"));
+  }
+  return vectors;
 }
 function splitChunks(body: string) {
   const blocks = body.split(/(?=^#{1,6}\s)/m); const result: { heading: string|null; level: number; text: string }[] = [];
@@ -67,11 +46,11 @@ async function reindex(clear: boolean, pathFilter?: string) {
       let raw = await fs.readFile(file, "utf8");
       raw = raw.replace(/^---\r?\n[\s\S]*?\r?\n---\s*/, "").trim();
       const tags = [...raw.matchAll(/(?:^|\s)#([\w/-]+)/g)].map((match) => match[1]);
+      const parts = splitChunks(raw).filter((part) => part.text.length >= minChunkCharacters);
+      const vectors = await embedInBatches(parts.map((part) => part.text));
       store.deleteFile(rel);
       store.ensureNote(rel);
-      for (const part of splitChunks(raw)) {
-        if (part.text.length < minChunkCharacters) continue;
-        const vector = await embed(part.text);
+      parts.forEach((part, i) => {
         const chunk: StoredChunk = {
           id: createHash("sha1").update(`${rel}\0${part.heading}\0${part.text}`).digest("hex"),
           file_path: rel,
@@ -80,11 +59,11 @@ async function reindex(clear: boolean, pathFilter?: string) {
           type: rel.startsWith("Daily Notes/") ? "daily" : "note",
           tags: [...new Set(tags)].join(","),
           content: part.text,
-          embedding: vector,
+          embedding: vectors[i],
         };
         store.insert(chunk);
         created++;
-      }
+      });
       const links = new Set<string>();
       for (const match of raw.matchAll(wikiRe)) {
         const target = resolve(match[1]);
@@ -118,8 +97,8 @@ function neighbors(seedPaths: string[], hops: number, limit: number) {
   return out;
 }
 const server=new McpServer({name:"obsidian-rag-mcp",version:"1.0.0"});
-server.registerTool("search_notes",{description:"Search Obsidian notes by semantic similarity; optionally expand through linked notes.",inputSchema:{query:z.string(),limit:z.number().int().min(1).max(100).optional(),note_type:z.string().optional(),expand:z.number().int().min(0).max(5).default(0)}},async({query,limit=10,note_type,expand})=>{const q=await embed(query,"search_query");const matches=store.search(q,limit,note_type).filter(x=>x.similarity>=settings.similarityThreshold);const results: Array<{file_path:string;heading?:string|null;content:string;similarity?:number;type?:string;source?:string;hop?:number;via?:string;direction?:string}>=matches.map(({chunk,similarity})=>({file_path:chunk.file_path,heading:chunk.heading,content:chunk.content.slice(0,500),similarity:Number(similarity.toFixed(3)),type:chunk.type}));if(expand&&results.length)for(const n of neighbors([...new Set(results.map(x=>x.file_path))],expand,limit*2)){const preview=store.getPreview(n.path,500);results.push({file_path:n.path,content:preview,source:"graph",hop:n.hop,via:n.via,direction:n.direction});}return{content:[{type:"text",text:JSON.stringify(results)}]};});
-server.registerTool("get_similar",{description:"Find semantically similar notes to a vault-relative note path.",inputSchema:{note_path:z.string(),limit:z.number().int().min(1).max(100).default(5)}},async({note_path,limit})=>{if(!store.hasNote(note_path))return{content:[{type:"text",text:JSON.stringify({error:`Note not found: ${note_path}`})}]};const q=await embed(store.getEmbeddingText(note_path,8000));const results=store.search(q,limit+10,undefined,note_path).slice(0,limit).map(({chunk,similarity})=>({file_path:chunk.file_path,heading:chunk.heading,preview:chunk.content.slice(0,200),similarity:Number(similarity.toFixed(3))}));return{content:[{type:"text",text:JSON.stringify(results)}]};});
+server.registerTool("search_notes",{description:"Search Obsidian notes by semantic similarity; optionally expand through linked notes.",inputSchema:{query:z.string(),limit:z.number().int().min(1).max(100).optional(),note_type:z.string().optional(),expand:z.number().int().min(0).max(5).default(0)}},async({query,limit=10,note_type,expand})=>{const q=await embedder.embed(query,"search_query");const matches=store.search(q,limit,note_type).filter(x=>x.similarity>=settings.similarityThreshold);const results: Array<{file_path:string;heading?:string|null;content:string;similarity?:number;type?:string;source?:string;hop?:number;via?:string;direction?:string}>=matches.map(({chunk,similarity})=>({file_path:chunk.file_path,heading:chunk.heading,content:chunk.content.slice(0,500),similarity:Number(similarity.toFixed(3)),type:chunk.type}));if(expand&&results.length)for(const n of neighbors([...new Set(results.map(x=>x.file_path))],expand,limit*2)){const preview=store.getPreview(n.path,500);results.push({file_path:n.path,content:preview,source:"graph",hop:n.hop,via:n.via,direction:n.direction});}return{content:[{type:"text",text:JSON.stringify(results)}]};});
+server.registerTool("get_similar",{description:"Find semantically similar notes to a vault-relative note path.",inputSchema:{note_path:z.string(),limit:z.number().int().min(1).max(100).default(5)}},async({note_path,limit})=>{if(!store.hasNote(note_path))return{content:[{type:"text",text:JSON.stringify({error:`Note not found: ${note_path}`})}]};const q=await embedder.embed(store.getEmbeddingText(note_path,8000));const results=store.search(q,limit+10,undefined,note_path).slice(0,limit).map(({chunk,similarity})=>({file_path:chunk.file_path,heading:chunk.heading,preview:chunk.content.slice(0,200),similarity:Number(similarity.toFixed(3))}));return{content:[{type:"text",text:JSON.stringify(results)}]};});
 server.registerTool("get_note_context",{description:"Get full note content, links, backlinks, and related notes.",inputSchema:{note_path:z.string(),limit:z.number().int().min(1).max(100).default(5)}},async({note_path,limit})=>{if(!store.hasNote(note_path))return{content:[{type:"text",text:JSON.stringify({error:`Note not found: ${note_path}`})}]};const embedding=store.getFirstEmbedding(note_path);const related=embedding?store.search(embedding,limit,undefined,note_path).map(({chunk,similarity})=>({file_path:chunk.file_path,heading:chunk.heading,similarity:Number(similarity.toFixed(3))})):[];return{content:[{type:"text",text:JSON.stringify({file_path:note_path,content:store.getContents(note_path).join("\n\n"),links:store.getLinks(note_path),backlinks:store.getBacklinks(note_path),similar_notes:related})}]};});
 server.registerTool("get_note_graph",{description:"Get outgoing links, backlinks, and graph neighbors of a note.",inputSchema:{note_path:z.string(),hops:z.number().int().min(1).max(5).default(1),limit:z.number().int().min(1).max(100).default(20)}},async({note_path,hops,limit})=>{if(!store.hasNote(note_path))return{content:[{type:"text",text:JSON.stringify({error:`Note not found: ${note_path}`})}]};return{content:[{type:"text",text:JSON.stringify({file_path:note_path,links:store.getLinks(note_path),backlinks:store.getBacklinks(note_path),beyond_one_hop:hops>1?neighbors([note_path],hops,limit).filter(n=>n.hop>1):[]})}]};});
 server.registerTool("get_stats",{description:"Show indexed chunk, note, and graph statistics.",inputSchema:{}},async()=>{const totals=store.stats();return{content:[{type:"text",text:JSON.stringify({collection:"obsidian_notes",count:totals.chunks,notes:totals.notes,link_edges:totals.links,config_path:settings.configPath,data_path:path.join(dataDir,"obsidian_notes.db"),vault_path:vault,provider,model})}]};});

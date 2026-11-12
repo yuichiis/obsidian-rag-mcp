@@ -47,14 +47,19 @@ const runtimePath = (value: string | undefined, configured: string | undefined, 
 const openaiKey = env.OPENAI_API_KEY ?? env.OBSIDIAN_RAG_API_KEY ?? file.openai?.api_key ?? file.api_key;
 const provider = env.OBSIDIAN_RAG_PROVIDER ?? file.provider ?? (openaiKey ? "openai" : "llamacpp");
 const providerSection = provider === "llamacpp" ? file.llamacpp : provider === "ollama" ? file.ollama : file.openai;
-const model = env.OBSIDIAN_RAG_MODEL ?? env.OBSIDIAN_RAG_LLAMACPP_MODEL ?? file.model ?? providerSection?.model
+const providerModelOverride = provider === "ollama"
+  ? env.OBSIDIAN_RAG_OLLAMA_MODEL
+  : provider === "llamacpp"
+    ? env.OBSIDIAN_RAG_LLAMACPP_MODEL
+    : undefined;
+const model = env.OBSIDIAN_RAG_MODEL ?? providerModelOverride ?? file.model ?? providerSection?.model
   ?? (provider === "ollama" ? "nomic-embed-text" : provider === "llamacpp" ? "default" : "text-embedding-3-small");
 const configuredChunkSize = Number(env.OBSIDIAN_RAG_CHUNK_SIZE ?? file.chunk_size ?? 1500);
 const chunkSizeLimit = model.toLowerCase().includes("nomic-embed-text-v2-moe") ? 512 : Number.POSITIVE_INFINITY;
 const configuredBaseUrl = provider === "llamacpp"
   ? env.OBSIDIAN_RAG_LLAMACPP_URL ?? env.OBSIDIAN_RAG_BASE_URL ?? file.llamacpp?.url ?? file.base_url ?? "http://localhost:9931"
   : provider === "ollama"
-    ? env.OBSIDIAN_RAG_BASE_URL ?? file.ollama?.url ?? file.base_url ?? "http://localhost:11434"
+    ? env.OBSIDIAN_RAG_OLLAMA_URL ?? env.OBSIDIAN_RAG_BASE_URL ?? file.ollama?.url ?? file.base_url ?? "http://localhost:11434"
     : env.OBSIDIAN_RAG_BASE_URL ?? file.openai?.base_url ?? file.base_url ?? "https://api.openai.com";
 
 export const settings = {

@@ -27,7 +27,26 @@ No API key is needed for a local llama-server unless you started it with `--api-
 }
 ```
 
-For Ollama, set `"provider": "ollama"` and configure its model and URL in the shared JSON file. For OpenAI-compatible servers, set `provider`, `model`, `base_url`, and, when needed, `openai.api_key` there.
+### Ollama
+
+Start Ollama and pull an embedding model, then point the shared config at it:
+
+```powershell
+ollama pull nomic-embed-text
+```
+
+```json
+{
+  "vault_path": "C:/path/to/your/ObsidianVault",
+  "provider": "ollama",
+  "model": "nomic-embed-text",
+  "ollama": { "url": "http://localhost:11434" }
+}
+```
+
+The server uses Ollama's modern `/api/embed` endpoint, including batch requests while indexing. Nomic models receive `search_document:` / `search_query:` task prefixes and Qwen models receive `Query:` on searches, matching the Python implementation. If Ollama sits behind a proxy that requires a Bearer token, add `"api_key": "..."` inside the `ollama` object. The URL defaults to `http://localhost:11434` and can be overridden with `ollama.url` or `OBSIDIAN_RAG_OLLAMA_URL`. The model defaults to `nomic-embed-text`; override it with `model`, `ollama.model`, `OBSIDIAN_RAG_MODEL`, or `OBSIDIAN_RAG_OLLAMA_MODEL`.
+
+For other OpenAI-compatible servers, set `provider`, `model`, `base_url`, and, when needed, `openai.api_key` there.
 
 ## Shared configuration
 
@@ -58,9 +77,9 @@ Example for llama.cpp:
 
 For a protected llama-server, add `"api_key": "..."` inside the `llamacpp` object. Use `/` in JSON paths on Windows, or escape backslashes as `\\`. Relative `vault_path` and `data_path` values are resolved from the config file's directory.
 
-Environment variables remain supported and override matching values in `config.json`. Set `OBSIDIAN_RAG_CONFIG` to use a config file at a custom location. Common overrides include `OBSIDIAN_RAG_VAULT`, `OBSIDIAN_RAG_PROVIDER`, `OBSIDIAN_RAG_MODEL`, and `OBSIDIAN_RAG_LLAMACPP_URL`.
+Environment variables remain supported and override matching values in `config.json`. Set `OBSIDIAN_RAG_CONFIG` to use a config file at a custom location. Common overrides include `OBSIDIAN_RAG_VAULT`, `OBSIDIAN_RAG_PROVIDER`, `OBSIDIAN_RAG_MODEL`, `OBSIDIAN_RAG_OLLAMA_URL`, `OBSIDIAN_RAG_OLLAMA_API_KEY`, `OBSIDIAN_RAG_OLLAMA_MODEL`, `OBSIDIAN_RAG_LLAMACPP_URL`, and `OBSIDIAN_RAG_LLAMACPP_API_KEY`.
 
-The first index can be built with the CLI or by calling the MCP `reindex` tool. Chunks, metadata, links, and float32 embeddings are kept in `obsidian_notes.db` under the configured data directory. If `obsidian_notes.json` from an older version is present, it is imported into SQLite on first launch. Searches stream stored vectors from SQLite and keep only the best matches in memory, so RAM use no longer grows with the entire embedding collection. Search uses exact cosine ranking over disk-backed rows; query time increases with corpus size. Chunk length defaults to 1,500 characters for other models; `nomic-embed-text-v2-moe` is capped at 512. The Python implementation's 1,500-token setting applies to v1 models with a larger context, not v2 moe. Short chunks are indexed by default; set `OBSIDIAN_RAG_MIN_CHARACTERS_PER_CHUNK` to raise the minimum length if desired.
+The first index can be built with the CLI or by calling the MCP `reindex` tool. Chunks, metadata, links, and float32 embeddings are kept in `obsidian_notes.db` under the configured data directory. If `obsidian_notes.json` from an older version is present, it is imported into SQLite on first launch. Embedding requests are batched (up to 16 chunks per request) while indexing, including Ollama's `/api/embed` batch input. Searches stream stored vectors from SQLite and keep only the best matches in memory, so RAM use no longer grows with the entire embedding collection. Search uses exact cosine ranking over disk-backed rows; query time increases with corpus size. Chunk length defaults to 1,500 characters for other models; `nomic-embed-text-v2-moe` is capped at 512. The Python implementation's 1,500-token setting applies to v1 models with a larger context, not v2 moe. Short chunks are indexed by default; set `OBSIDIAN_RAG_MIN_CHARACTERS_PER_CHUNK` to raise the minimum length if desired.
 
 ## Command line
 
@@ -124,4 +143,4 @@ Example MCP client configuration:
 }
 ```
 
-The server stores vectors in a local SQLite database and performs bounded-memory exact cosine search. It supports OpenAI-compatible embeddings, llama.cpp `llama-server`, and Ollama's `/api/embed` endpoint. Configure indexing and search with MCP tools after connecting.
+The server stores vectors in a local SQLite database and performs bounded-memory exact cosine search. It supports OpenAI-compatible embeddings, llama.cpp `llama-server`, and Ollama's `/api/embed` endpoint (with batch indexing and Nomic/Qwen task prefixes). Configure indexing and search with MCP tools after connecting.

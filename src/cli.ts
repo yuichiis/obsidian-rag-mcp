@@ -21,6 +21,7 @@ Commands:
   watch [--debounce seconds]  Watch the vault and index Markdown file changes
 
 Environment: OBSIDIAN_RAG_VAULT, OBSIDIAN_RAG_PROVIDER, OBSIDIAN_RAG_MODEL,
+             OBSIDIAN_RAG_OLLAMA_URL, OBSIDIAN_RAG_OLLAMA_API_KEY, OBSIDIAN_RAG_OLLAMA_MODEL,
              OBSIDIAN_RAG_LLAMACPP_URL, OBSIDIAN_RAG_LLAMACPP_API_KEY`;
 
 function parseLimit(args: string[], fallback = 10) {
