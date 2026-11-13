@@ -131,6 +131,8 @@ The tests create a temporary vault and local fake embeddings endpoint. They exer
 
 `index --clear` clears the existing index before rebuilding it. Invoke this option directly through Node (`node .\dist\cli.js index --clear`) so npm does not parse `--clear` as one of its own options. Avoid combining `--clear` with a single-file path unless you intend to clear the rest of the index.
 
+If any note fails to index, the `errors` field includes the underlying cause (for example `connect ECONNREFUSED 127.0.0.1:9931`) and the CLI exits with a non-zero status.
+
 To keep the index updated as notes are added, edited, renamed, or deleted, run the watcher in a terminal:
 
 ```powershell

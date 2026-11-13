@@ -30,6 +30,41 @@ function authHeaders(apiKey?: string) {
   return headers;
 }
 
+/** Flatten an error and its cause chain (including AggregateError entries) into one message. */
+export function describeError(error: unknown): string {
+  const messages: string[] = [];
+  const visit = (value: unknown, depth: number) => {
+    if (depth > 4 || !value) return;
+    if (value instanceof AggregateError) {
+      for (const inner of value.errors) visit(inner, depth + 1);
+      if (!value.errors.length && value.message) messages.push(value.message);
+      return;
+    }
+    if (value instanceof Error) {
+      if (value.message) messages.push(value.message);
+      if (value.cause) visit(value.cause, depth + 1);
+      return;
+    }
+    messages.push(String(value));
+  };
+  visit(error, 0);
+  const parts: string[] = [];
+  for (const message of messages) {
+    if (!message || parts.some((part) => part.includes(message))) continue;
+    parts.push(message);
+  }
+  return parts.length ? parts.join(" | ") : String(error);
+}
+
+/** Fetch a URL and report connection failures with the underlying cause. */
+async function fetchOrThrow(url: string, init: RequestInit, source: string) {
+  try {
+    return await fetch(url, init);
+  } catch (error) {
+    throw new Error(`Could not reach ${source} at ${url}: ${describeError(error)}`, { cause: error });
+  }
+}
+
 /** Apply the model-specific task prefix to one text or a batch. */
 function withPrefix(input: string | string[], model: string, taskType: TaskType, enabled: boolean) {
   if (!enabled) return input;
@@ -79,12 +114,12 @@ class OpenAICompatibleEmbedder implements Embedder {
     await this.beforeRequest?.();
     const prefixed = withPrefix(input, this.model, taskType, this.prefix);
     const expected = Array.isArray(prefixed) ? prefixed.length : 1;
-    const response = await fetch(`${this.baseUrl}/v1/embeddings`, {
+    const response = await fetchOrThrow(`${this.baseUrl}/v1/embeddings`, {
       method: "POST",
       headers: authHeaders(this.apiKey),
       body: JSON.stringify({ model: this.model, input: prefixed }),
       signal: AbortSignal.timeout(this.timeoutMs),
-    });
+    }, "Embedding API");
     if (!response.ok) throw new Error(`Embedding API ${response.status}: ${await response.text()}`);
     const data = await response.json() as { data?: { index?: number; embedding: number[] }[] };
     const items = data.data;
@@ -155,12 +190,12 @@ class OllamaEmbedder implements Embedder {
   private async request(input: string | string[], taskType: TaskType) {
     const prefixed = withPrefix(input, this.model, taskType, true);
     const expected = Array.isArray(prefixed) ? prefixed.length : 1;
-    const response = await fetch(`${this.baseUrl}/api/embed`, {
+    const response = await fetchOrThrow(`${this.baseUrl}/api/embed`, {
       method: "POST",
       headers: authHeaders(this.apiKey),
       body: JSON.stringify({ model: this.model, input: prefixed }),
       signal: AbortSignal.timeout(60_000),
-    });
+    }, "Ollama embedding API");
     if (!response.ok) throw new Error(`Ollama embedding API ${response.status}: ${await response.text()}`);
     const data = await response.json() as { embeddings?: number[][] };
     return requireVectors(data.embeddings, expected, "Ollama embedding API");

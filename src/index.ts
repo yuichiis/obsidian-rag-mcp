@@ -6,7 +6,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { settings } from "./config.js";
-import { createEmbedder } from "./embedder.js";
+import { createEmbedder, describeError } from "./embedder.js";
 import { SqliteStore, type StoredChunk } from "./store.js";
 
 const vault = settings.vaultPath;
@@ -116,7 +116,7 @@ async function reindex(clear: boolean, pathFilter?: string) {
       }
       store.replaceLinks(rel, [...links].sort());
       indexed++;
-    } catch (error) { errors.push({ file: rel, error: String(error) }); }
+    } catch (error) { errors.push({ file: rel, error: describeError(error) }); }
   }
   const totals = store.stats();
   return { files_indexed: indexed, chunks_created: created, link_edges: totals.links, total_in_store: totals.chunks, errors: errors.length ? errors : null, path_filter: pathFilter ?? null, cleared: clear };
@@ -299,7 +299,13 @@ server.registerTool(
     description: "Index or refresh Markdown notes and their Obsidian wikilink graph.",
     inputSchema: { clear: z.boolean().default(false), path_filter: z.string().optional() },
   },
-  async ({ clear, path_filter }) => ({ content: [{ type: "text", text: JSON.stringify(await reindex(clear, path_filter)) }] }),
+  async ({ clear, path_filter }) => {
+    const result = await reindex(clear, path_filter);
+    return {
+      content: [{ type: "text", text: JSON.stringify(result) }],
+      ...(result.errors ? { isError: true } : {}),
+    };
+  },
 );
 
 server.registerTool(
