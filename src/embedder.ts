@@ -184,6 +184,14 @@ export function createEmbedder({ provider, model, baseUrl, apiKey }: EmbedderOpt
   switch (provider) {
     case "ollama":
       return new OllamaEmbedder({ model, baseUrl, apiKey });
+    case "lmstudio":
+      return new OpenAICompatibleEmbedder({
+        model,
+        baseUrl,
+        apiKey,
+        prefix: true,
+        timeoutMs: 60_000,
+      });
     case "llamacpp":
       return new LlamaCppEmbedder({ model, baseUrl, apiKey });
     case "openai":
@@ -195,6 +203,6 @@ export function createEmbedder({ provider, model, baseUrl, apiKey }: EmbedderOpt
         timeoutMs: 60_000,
       });
     default:
-      throw new Error(`Unknown provider: ${provider}. Use 'openai', 'ollama', or 'llamacpp'.`);
+      throw new Error(`Unknown provider: ${provider}. Use 'openai', 'ollama', 'lmstudio', or 'llamacpp'.`);
   }
 }
