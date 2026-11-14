@@ -1,0 +1,45 @@
+# systemd user unit for the obsidian-rag-mcp watcher daemon (Ubuntu).
+#
+# Install (user mode, no sudo):
+#   mkdir -p ~/.config/systemd/user
+#   cp extras/obsidian-rag-mcp-watcher.service ~/.config/systemd/user/
+#   # Edit ExecStart / Environment below to match your setup, then:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now obsidian-rag-mcp-watcher.service
+#
+# Useful commands:
+#   systemctl --user status obsidian-rag-mcp-watcher.service
+#   journalctl --user -u obsidian-rag-mcp-watcher.service -f
+#   systemctl --user restart obsidian-rag-mcp-watcher.service
+#
+# Run at boot without an active login session:
+#   loginctl enable-linger "$USER"
+#
+
+[Unit]
+Description=obsidian-rag-mcp watcher - auto-index notes on change
+Documentation=https://github.com/yuichiis/obsidian-rag-mcp
+Wants=network-online.target
+After=network-online.target
+
+
+[Service]
+Type=simple
+# Default install location for `npm run install`. Adjust if needed, e.g.:
+#   ExecStart=%h/.nvm/versions/node/v24.22.1/bin/node %h/github/obsidian-rag-mcp/dist/cli.js watch
+ExecStart=%h/.nvm/versions/node/v24.22.1/bin/node %h/github/obsidian-rag-mcp/dist/cli.js watch
+Restart=always
+RestartSec=30
+# Optional overrides (config file values are used when commented out):
+#Environment=OBSIDIAN_RAG_VAULT=%h/Documents/vault
+#Environment=OBSIDIAN_RAG_DATA=%h/.local/share/obsidian-rag-mcp/data
+#Environment=OBSIDIAN_RAG_PROVIDER=llamacpp
+#Environment=OBSIDIAN_RAG_LLAMACPP_URL=http://localhost:9931
+#Environment=OBSIDIAN_RAG_MODEL=nomic-embed-text-v2-moe
+#Environment=OBSIDIAN_RAG_DEBOUNCE=2.0
+# NOTE: do not commit secrets here (unit files are world-readable).
+# For API keys prefer `systemctl --user edit obsidian-rag-mcp-watcher.service`
+# with e.g. `Environment=OPENAI_API_KEY=...`.
+
+[Install]
+WantedBy=default.target
