@@ -2,9 +2,12 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { watch as watchFs, type FSWatcher } from "node:fs";
-import { readFile, stat } from "node:fs/promises";
+import { mkdir, readFile, stat } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { settings } from "./config.js";
+import { createEmbedder } from "./embedder.js";
+import { createReindexer } from "./indexer.js";
+import { SqliteStore } from "./store.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -23,7 +26,9 @@ Commands:
 Environment: OBSIDIAN_RAG_VAULT, OBSIDIAN_RAG_PROVIDER, OBSIDIAN_RAG_MODEL,
              OBSIDIAN_RAG_OLLAMA_URL, OBSIDIAN_RAG_OLLAMA_API_KEY, OBSIDIAN_RAG_OLLAMA_MODEL,
              OBSIDIAN_RAG_LMSTUDIO_URL, OBSIDIAN_RAG_LMSTUDIO_API_KEY, OBSIDIAN_RAG_LMSTUDIO_MODEL,
-             OBSIDIAN_RAG_LLAMACPP_URL, OBSIDIAN_RAG_LLAMACPP_API_KEY`;
+             OBSIDIAN_RAG_LLAMACPP_URL, OBSIDIAN_RAG_LLAMACPP_API_KEY
+
+The 'index' command runs in this process (no MCP timeout) and shows progress on stderr.`;
 
 function parseLimit(args: string[], fallback = 10) {
   const i = args.findIndex((arg) => arg === "-n" || arg === "--limit");
@@ -45,28 +50,80 @@ function vaultRelative(file: string) {
   return relative.replaceAll("\\", "/");
 }
 
+function elapsed(startedAt: number | undefined) {
+  return startedAt === undefined ? "?" : `${((Date.now() - startedAt) / 1000).toFixed(1)}s`;
+}
+
+/** Index directly in this process so large vaults are not limited by MCP request timeouts. */
+async function runIndex(args: string[]) {
+  const clear = args.includes("--clear");
+  const targets = args.filter((arg) => arg !== "--clear");
+  if (targets.length > 1) throw new Error("Specify at most one Markdown file to index");
+  let path_filter: string | undefined;
+  if (targets[0]) {
+    const relative = vaultRelative(targets[0]);
+    const requested = path.join(settings.vaultPath, relative);
+    if (!(await stat(requested)).isFile()) throw new Error("The specified path is not a file");
+    path_filter = relative;
+  }
+
+  await mkdir(settings.dataPath, { recursive: true });
+  const store = new SqliteStore(settings.dataPath);
+  const embedder = createEmbedder({
+    provider: settings.provider,
+    model: settings.model,
+    baseUrl: settings.baseUrl,
+    apiKey: settings.apiKey,
+  });
+  let totalFiles = 0;
+  try {
+    const reindex = createReindexer({
+      vault: settings.vaultPath,
+      store,
+      embedder,
+      maxChunk: settings.maxChunk,
+      minChunkCharacters: settings.minChunkCharacters,
+    });
+    const startedAt = new Map<number, number>();
+    const result = await reindex(clear, path_filter, (event) => {
+      if (event.type === "start") {
+        totalFiles = event.total;
+        console.error(`Indexing ${event.total} file(s)${event.clear ? " after clearing the index" : ""}...`);
+        if (!event.total) console.error("No Markdown files matched.");
+      } else if (event.type === "file-start") {
+        startedAt.set(event.index, Date.now());
+        console.error(`[${event.index}/${event.total}] Indexing ${event.file} ...`);
+      } else if (event.type === "file-done") {
+        const chunkLabel = event.chunks === 1 ? "chunk" : "chunks";
+        console.error(`[${event.index}/${event.total}] OK ${event.file} (${event.chunks} ${chunkLabel}, ${elapsed(startedAt.get(event.index))})`);
+      } else {
+        console.error(`[${event.index}/${event.total}] FAILED ${event.file}: ${event.error}`);
+      }
+    });
+    const failed = result.errors?.length ?? 0;
+    console.error(`Finished: ${result.files_indexed}/${totalFiles} file(s) indexed, ${result.chunks_created} chunk(s) created${failed ? `, ${failed} failed` : ""}.`);
+    console.log(JSON.stringify(result));
+    if (result.errors) process.exitCode = 1;
+  } finally {
+    store.close();
+    embedder.close();
+  }
+}
+
 async function main() {
   const [command, ...args] = process.argv.slice(2);
   if (!command || command === "--help" || command === "-h") { console.log(usage); return; }
   const supported = ["index", "search", "similar", "content", "graph", "stats", "remove", "watch"];
   if (!supported.includes(command)) throw new Error(`Unknown command: ${command}\n\n${usage}`);
 
+  if (command === "index") {
+    await runIndex(args);
+    return;
+  }
+
   let toolName: string;
   let toolArgs: Record<string, unknown>;
-  if (command === "index") {
-    const clear = args.includes("--clear");
-    const targets = args.filter((arg) => arg !== "--clear");
-    if (targets.length > 1) throw new Error("Specify at most one Markdown file to index");
-    let path_filter: string | undefined;
-    if (targets[0]) {
-      const relative = vaultRelative(targets[0]);
-      const requested = path.join(settings.vaultPath, relative);
-      if (!(await stat(requested)).isFile()) throw new Error("The specified path is not a file");
-      path_filter = relative;
-    }
-    toolName = "reindex";
-    toolArgs = { clear, ...(path_filter ? { path_filter } : {}) };
-  } else if (command === "search") {
+  if (command === "search") {
     const limit = parseLimit(args, 10);
     const query = args.join(" ").trim();
     if (!query) throw new Error("Provide a search query.\n\nUsage: obsidian-rag search <query> [-n limit]");

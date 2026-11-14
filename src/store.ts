@@ -198,4 +198,8 @@ export class SqliteStore {
     const notes = Number((this.db.prepare("SELECT COUNT(*) AS count FROM notes").get() as { count: number }).count);
     return { chunks, links, notes };
   }
+
+  close() {
+    this.db.close();
+  }
 }

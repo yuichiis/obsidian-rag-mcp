@@ -4,123 +4,18 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { createHash } from "node:crypto";
 import { settings } from "./config.js";
-import { createEmbedder, describeError } from "./embedder.js";
-import { SqliteStore, type StoredChunk } from "./store.js";
+import { createEmbedder } from "./embedder.js";
+import { createReindexer } from "./indexer.js";
+import { SqliteStore } from "./store.js";
 
 const vault = settings.vaultPath;
 const dataDir = settings.dataPath;
 const { provider, model, baseUrl, apiKey, maxChunk, minChunkCharacters } = settings;
 const embedder = createEmbedder({ provider, model, baseUrl, apiKey });
-const EMBED_BATCH_SIZE = 16;
 await fs.mkdir(dataDir, { recursive: true });
 const store = new SqliteStore(dataDir);
-
-async function embedInBatches(texts: string[]): Promise<number[][]> {
-  const vectors: number[][] = [];
-  for (let i = 0; i < texts.length; i += EMBED_BATCH_SIZE) {
-    vectors.push(...await embedder.embedBatch(texts.slice(i, i + EMBED_BATCH_SIZE), "search_document"));
-  }
-  return vectors;
-}
-
-function splitChunks(body: string) {
-  const blocks = body.split(/(?=^#{1,6}\s)/m);
-  const result: { heading: string | null; level: number; text: string }[] = [];
-  for (const block of blocks) {
-    const m = block.match(/^(#{1,6})\s+(.+?)\s*$/m);
-    const heading = m?.[2] ?? null, level = m?.[1]?.length ?? 0;
-    const clean = block.trim();
-    if (!clean) continue;
-    if (clean.length <= maxChunk) result.push({ heading, level, text: clean });
-    else {
-      let rest = clean;
-      while (rest.length) {
-        let cut = Math.min(maxChunk, rest.length);
-        if (cut < rest.length) {
-          const boundary = rest.lastIndexOf("\n\n", cut);
-          if (boundary > maxChunk * .55) cut = boundary;
-        }
-        const part = rest.slice(0, cut).trim();
-        if (part) result.push({ heading, level, text: part });
-        rest = rest.slice(cut).trim();
-      }
-    }
-  }
-  return result;
-}
-
-async function markdownFiles(dir: string): Promise<string[]> {
-  const out: string[] = [];
-  const excluded = new Set([".git", ".obsidian", ".trash", "attachments", "node_modules", "dist", "coverage"]);
-  for (const ent of await fs.readdir(dir, { withFileTypes: true })) {
-    if (excluded.has(ent.name) || ent.name.startsWith(".")) continue;
-    const full = path.join(dir, ent.name);
-    if (ent.isDirectory()) out.push(...await markdownFiles(full));
-    else if (ent.isFile() && ent.name.toLowerCase().endsWith(".md")) out.push(full);
-  }
-  return out;
-}
-
-const wikiRe = /\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]/g;
-function makeResolver(files: string[]) {
-  const names = new Map<string, string[]>();
-  for (const f of files) {
-    const rel = path.relative(vault, f).replaceAll("\\", "/");
-    const base = path.basename(rel, ".md");
-    names.set(base, [...(names.get(base) ?? []), rel]);
-  }
-  return (target: string) => {
-    const normalized = target.trim().replaceAll("\\", "/").replace(/\.md$/i, "");
-    const exact = files.map(f => path.relative(vault, f).replaceAll("\\", "/")).find(x => x.replace(/\.md$/i, "") === normalized);
-    return exact ?? names.get(path.basename(normalized))?.sort((a, b) => a.length - b.length)[0];
-  };
-}
-
-async function reindex(clear: boolean, pathFilter?: string) {
-  const files = await markdownFiles(vault);
-  const selected = files.filter((file) => !pathFilter || path.relative(vault, file).replaceAll("\\", "/").startsWith(pathFilter));
-  if (clear) store.clear();
-  const resolve = makeResolver(files);
-  let indexed = 0, created = 0;
-  const errors: { file: string; error: string }[] = [];
-  for (const file of selected) {
-    const rel = path.relative(vault, file).replaceAll("\\", "/");
-    try {
-      let raw = await fs.readFile(file, "utf8");
-      raw = raw.replace(/^---\r?\n[\s\S]*?\r?\n---\s*/, "").trim();
-      const tags = [...raw.matchAll(/(?:^|\s)#([\w/-]+)/g)].map((match) => match[1]);
-      const parts = splitChunks(raw).filter((part) => part.text.length >= minChunkCharacters);
-      const vectors = await embedInBatches(parts.map((part) => part.text));
-      store.deleteFile(rel);
-      store.ensureNote(rel);
-      parts.forEach((part, i) => {
-        const chunk: StoredChunk = {
-          id: createHash("sha1").update(`${rel}\0${part.heading}\0${part.text}`).digest("hex"),
-          file_path: rel,
-          heading: part.heading,
-          heading_level: part.level,
-          type: rel.startsWith("Daily Notes/") ? "daily" : "note",
-          tags: [...new Set(tags)].join(","),
-          content: part.text,
-          embedding: vectors[i],
-        };
-        store.insert(chunk);
-        created++;
-      });
-      const links = new Set<string>();
-      for (const match of raw.matchAll(wikiRe)) {
-        const target = resolve(match[1]);
-        if (target && target !== rel) links.add(target);
-      }
-      store.replaceLinks(rel, [...links].sort());
-      indexed++;
-    } catch (error) { errors.push({ file: rel, error: describeError(error) }); }
-  }
-  const totals = store.stats();
-  return { files_indexed: indexed, chunks_created: created, link_edges: totals.links, total_in_store: totals.chunks, errors: errors.length ? errors : null, path_filter: pathFilter ?? null, cleared: clear };
-}
+const reindex = createReindexer({ vault, store, embedder, maxChunk, minChunkCharacters });
 
 function neighbors(seedPaths: string[], hops: number, limit: number) {
   const seen = new Set(seedPaths);

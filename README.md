@@ -106,6 +106,18 @@ node .\dist\cli.js index
 node .\dist\cli.js search 'project decisions and architecture' -n 5
 ```
 
+`index` runs the indexing code directly in the CLI process instead of calling the MCP server, so large vaults are not limited by MCP request timeouts. It prints per-file progress to stderr and the final JSON summary to stdout, for example:
+
+```text
+Indexing 120 file(s)...
+[1/120] Indexing Projects/Architecture.md ...
+[1/120] OK Projects/Architecture.md (4 chunks, 0.8s)
+[2/120] FAILED Projects/Old.md: Could not reach Embedding API ...
+Finished: 119/120 file(s) indexed, 431 chunk(s) created, 1 failed.
+```
+
+The MCP `reindex` tool remains available for MCP clients. Clients indexing very large vaults through MCP may need to raise their request timeout.
+
 To add or refresh one file, pass its path relative to the vault. The file must be a Markdown file inside the vault:
 
 ```powershell
