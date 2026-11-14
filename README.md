@@ -154,6 +154,36 @@ node .\dist\cli.js watch --debounce 3
 
 The watcher waits two seconds after a change by default, then indexes that note. Duplicate filesystem events with unchanged file contents are ignored. It removes deleted notes and their link edges from the index. Stop it with Ctrl+C. It watches for changes after startup and does not perform a full initial reindex.
 
+### Run the watcher at login
+
+Ready-made definitions are in `extras/`.
+
+**Ubuntu (systemd user service)**
+
+`extras/obsidian-rag-mcp-watcher.service` runs the watcher as a user service. Copy it to `~/.config/systemd/user/`, update `ExecStart` and the optional environment variables if needed, then:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now obsidian-rag-mcp-watcher.service
+journalctl --user -u obsidian-rag-mcp-watcher.service -f
+```
+
+To start it at boot without an active login session, run `loginctl enable-linger "$USER"`.
+
+**Windows (Task Scheduler)**
+
+`extras/install-watcher-task.ps1` registers a task that starts `node dist\cli.js watch` at logon and appends its output to `%LOCALAPPDATA%\obsidian-rag-mcp\watcher.log`:
+
+```powershell
+.\extras\install-watcher-task.ps1
+# Start immediately as well
+.\extras\install-watcher-task.ps1 -StartNow
+# Remove the task
+.\extras\install-watcher-task.ps1 -Uninstall
+```
+
+Run `npm run build` first. Use `-NodePath` if `node` is not on PATH, and `-LogPath` to choose a different log file.
+
 After installing the package globally or linking it with `npm link`, the same commands are available as `obsidian-rag index` and `obsidian-rag search ...`.
 
 Example MCP client configuration:
