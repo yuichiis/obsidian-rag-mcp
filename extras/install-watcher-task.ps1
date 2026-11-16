@@ -40,7 +40,6 @@
 param(
   [string]$TaskName = "obsidian-rag-mcp-watcher",
   [string]$NodePath,
-  [string]$LogPath,
   [switch]$StartNow,
   [switch]$Uninstall
 )
@@ -77,15 +76,9 @@ if (-not (Test-Path -LiteralPath $NodePath)) {
   throw "Node.js executable not found: $NodePath"
 }
 
-if (-not $LogPath) {
-  $LogPath = Join-Path $env:LOCALAPPDATA "obsidian-rag-mcp\watcher.log"
-}
-$logDir = Split-Path -Parent $LogPath
-New-Item -ItemType Directory -Force -Path $logDir | Out-Null
-
-$comspec = if ($env:ComSpec) { $env:ComSpec } else { Join-Path $env:SystemRoot "System32\cmd.exe" }
-$arguments = '/c ""{0}" "{1}" watch >> "{2}" 2>&1"' -f $NodePath, $cliPath, $LogPath
-$action = New-ScheduledTaskAction -Execute $comspec -Argument $arguments -WorkingDirectory $projectRoot
+$shell = Join-Path $env:SystemRoot "\System32\WindowsPowerShell\v1.0\powershell.exe"
+$arguments = '-WindowStyle Hidden -NoProfile -Command "& ''{0}'' ''{1}'' watch"' -f $NodePath, $cliPath
+$action = New-ScheduledTaskAction -Execute $shell -Argument $arguments -WorkingDirectory $projectRoot
 $trigger = New-ScheduledTaskTrigger -AtLogOn
 $settings = New-ScheduledTaskSettingsSet `
   -AllowStartIfOnBatteries `
@@ -109,7 +102,6 @@ if ($PSCmdlet.ShouldProcess($TaskName, "Register scheduled task at logon")) {
 
   Write-Host "Registered scheduled task '$TaskName'."
   Write-Host "  Command: $NodePath $cliPath watch"
-  Write-Host "  Log:     $LogPath"
 
   if ($StartNow) {
     Start-ScheduledTask -TaskName $TaskName
