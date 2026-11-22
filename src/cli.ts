@@ -28,7 +28,7 @@ Environment: OBSIDIAN_RAG_VAULT, OBSIDIAN_RAG_PROVIDER, OBSIDIAN_RAG_MODEL,
              OBSIDIAN_RAG_LMSTUDIO_URL, OBSIDIAN_RAG_LMSTUDIO_API_KEY, OBSIDIAN_RAG_LMSTUDIO_MODEL,
              OBSIDIAN_RAG_LLAMACPP_URL, OBSIDIAN_RAG_LLAMACPP_API_KEY
 
-The 'index' command runs in this process (no MCP timeout) and shows progress on stderr.`;
+The 'index' and 'watch' commands call the indexer directly in this process instead of going through MCP.`;
 
 function parseLimit(args: string[], fallback = 10) {
   const i = args.findIndex((arg) => arg === "-n" || arg === "--limit");
@@ -110,6 +110,80 @@ async function runIndex(args: string[]) {
   }
 }
 
+/** Watch the vault and index changed notes directly, without routing through the MCP server. */
+async function runWatch(args: string[]) {
+  const vault = settings.vaultPath;
+  const debounceArg = args.indexOf("--debounce");
+  const debounceSeconds = debounceArg < 0 ? settings.watchDebounceSeconds : Number(args[debounceArg + 1]);
+  if (!Number.isFinite(debounceSeconds) || debounceSeconds < 0.1 || debounceSeconds > 60) throw new Error("Debounce must be between 0.1 and 60 seconds");
+
+  await mkdir(settings.dataPath, { recursive: true });
+  const store = new SqliteStore(settings.dataPath);
+  const embedder = createEmbedder({
+    provider: settings.provider,
+    model: settings.model,
+    baseUrl: settings.baseUrl,
+    apiKey: settings.apiKey,
+  });
+  const reindex = createReindexer({
+    vault,
+    store,
+    embedder,
+    maxChunk: settings.maxChunk,
+    minChunkCharacters: settings.minChunkCharacters,
+  });
+  const pending = new Map<string, NodeJS.Timeout>();
+  let taskQueue = Promise.resolve();
+  const processedHashes = new Map<string, string>();
+  const excluded = new Set([".git", ".obsidian", ".trash", "attachments", "node_modules", "dist", "coverage"]);
+  try {
+    const watcher: FSWatcher = watchFs(vault, { recursive: true }, (_event, filename) => {
+      if (!filename) return;
+      const rel = filename.toString().replaceAll("\\", "/");
+      if (!rel.toLowerCase().endsWith(".md") || rel.split("/").some((part) => excluded.has(part) || part.startsWith("."))) return;
+      const previous = pending.get(rel);
+      if (previous) clearTimeout(previous);
+      pending.set(rel, setTimeout(async () => {
+        pending.delete(rel);
+        taskQueue = taskQueue.then(async () => {
+          try {
+            const fullPath = path.join(vault, rel);
+            let exists = true;
+            try { exists = (await stat(fullPath)).isFile(); } catch { exists = false; }
+            const fingerprint = exists ? createHash("sha256").update(await readFile(fullPath)).digest("hex") : "deleted";
+            if (processedHashes.get(rel) === fingerprint) return;
+            if (exists) {
+              const result = await reindex(false, rel);
+              console.log(`Indexed ${rel}: ${JSON.stringify(result)}`);
+              if (result.errors) console.error(`Failed to process ${rel}`);
+              else processedHashes.set(rel, fingerprint);
+            } else {
+              const chunksRemoved = store.removeNote(rel);
+              console.log(`Removed ${rel}: ${JSON.stringify({ file_path: rel, chunks_removed: chunksRemoved })}`);
+              processedHashes.set(rel, fingerprint);
+            }
+          } catch (error) { console.error(`Failed to process ${rel}: ${String(error)}`); }
+        });
+      }, debounceSeconds * 1000));
+    });
+    watcher.on("error", (error) => console.error(`Vault watcher error: ${error.message}`));
+    console.log(`Watching vault: ${vault} (debounce ${debounceSeconds}s). Press Ctrl+C to stop.`);
+    await new Promise<void>((resolve) => {
+      const stop = () => {
+        watcher.close();
+        for (const timer of pending.values()) clearTimeout(timer);
+        pending.clear();
+        void taskQueue.finally(() => resolve());
+      };
+      process.once("SIGINT", stop);
+      process.once("SIGTERM", stop);
+    });
+  } finally {
+    store.close();
+    embedder.close();
+  }
+}
+
 async function main() {
   const [command, ...args] = process.argv.slice(2);
   if (!command || command === "--help" || command === "-h") { console.log(usage); return; }
@@ -118,6 +192,11 @@ async function main() {
 
   if (command === "index") {
     await runIndex(args);
+    return;
+  }
+
+  if (command === "watch") {
+    await runWatch(args);
     return;
   }
 
@@ -154,12 +233,9 @@ async function main() {
     if (!note || args.length) throw new Error("Usage: obsidian-rag remove <file.md>");
     toolName = "remove_note";
     toolArgs = { note_path: vaultRelative(note) };
-  } else if (command === "stats") {
+  } else {
     if (args.length) throw new Error("Usage: obsidian-rag stats");
     toolName = "get_stats";
-    toolArgs = {};
-  } else {
-    toolName = "watch";
     toolArgs = {};
   }
 
@@ -173,52 +249,9 @@ async function main() {
   const client = new Client({ name: "obsidian-rag-cli", version: "1.0.0" });
   try {
     await client.connect(transport);
-    if (command !== "watch") {
-      const result = await client.callTool({ name: toolName, arguments: toolArgs }) as { content?: Array<{ type: string; text?: string }>; isError?: boolean };
-      for (const item of result.content ?? []) if (item.type === "text") console.log(item.text);
-      if (result.isError) process.exitCode = 1;
-    } else {
-      const vault = settings.vaultPath;
-      const debounceArg = args.indexOf("--debounce");
-      const debounceSeconds = debounceArg < 0 ? settings.watchDebounceSeconds : Number(args[debounceArg + 1]);
-      if (!Number.isFinite(debounceSeconds) || debounceSeconds < 0.1 || debounceSeconds > 60) throw new Error("Debounce must be between 0.1 and 60 seconds");
-      const pending = new Map<string, NodeJS.Timeout>();
-      let taskQueue = Promise.resolve();
-      const processedHashes = new Map<string, string>();
-      const excluded = new Set([".git", ".obsidian", ".trash", "attachments", "node_modules", "dist", "coverage"]);
-      const watcher: FSWatcher = watchFs(vault, { recursive: true }, (_event, filename) => {
-        if (!filename) return;
-        const rel = filename.toString().replaceAll("\\", "/");
-        if (!rel.toLowerCase().endsWith(".md") || rel.split("/").some((part) => excluded.has(part) || part.startsWith("."))) return;
-        const previous = pending.get(rel);
-        if (previous) clearTimeout(previous);
-        pending.set(rel, setTimeout(async () => {
-          pending.delete(rel);
-          taskQueue = taskQueue.then(async () => {
-            try {
-              const fullPath = path.join(vault, rel);
-              let exists = true;
-              try { exists = (await stat(fullPath)).isFile(); } catch { exists = false; }
-              const fingerprint = exists ? createHash("sha256").update(await readFile(fullPath)).digest("hex") : "deleted";
-              if (processedHashes.get(rel) === fingerprint) return;
-              const result = await client.callTool({ name: exists ? "reindex" : "remove_note", arguments: exists ? { clear: false, path_filter: rel } : { note_path: rel } }) as { content?: Array<{ type: string; text?: string }>; isError?: boolean };
-              const label = exists ? "Indexed" : "Removed";
-              const details = result.content?.find((item) => item.type === "text")?.text ?? "";
-              console.log(`${label} ${rel}${details ? `: ${details}` : ""}`);
-              if (result.isError) console.error(`Failed to process ${rel}`);
-              else processedHashes.set(rel, fingerprint);
-            } catch (error) { console.error(`Failed to process ${rel}: ${String(error)}`); }
-          });
-        }, debounceSeconds * 1000));
-      });
-      watcher.on("error", (error) => console.error(`Vault watcher error: ${error.message}`));
-      console.log(`Watching vault: ${vault} (debounce ${debounceSeconds}s). Press Ctrl+C to stop.`);
-      await new Promise<void>((resolve) => {
-        const stop = () => { watcher.close(); for (const timer of pending.values()) clearTimeout(timer); pending.clear(); resolve(); };
-        process.once("SIGINT", stop);
-        process.once("SIGTERM", stop);
-      });
-    }
+    const result = await client.callTool({ name: toolName, arguments: toolArgs }) as { content?: Array<{ type: string; text?: string }>; isError?: boolean };
+    for (const item of result.content ?? []) if (item.type === "text") console.log(item.text);
+    if (result.isError) process.exitCode = 1;
   } finally {
     await client.close();
   }

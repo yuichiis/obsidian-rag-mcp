@@ -6,16 +6,14 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { settings } from "./config.js";
 import { createEmbedder } from "./embedder.js";
-import { createReindexer } from "./indexer.js";
 import { SqliteStore } from "./store.js";
 
 const vault = settings.vaultPath;
 const dataDir = settings.dataPath;
-const { provider, model, baseUrl, apiKey, maxChunk, minChunkCharacters } = settings;
+const { provider, model, baseUrl, apiKey } = settings;
 const embedder = createEmbedder({ provider, model, baseUrl, apiKey });
 await fs.mkdir(dataDir, { recursive: true });
 const store = new SqliteStore(dataDir);
-const reindex = createReindexer({ vault, store, embedder, maxChunk, minChunkCharacters });
 
 function neighbors(seedPaths: string[], hops: number, limit: number) {
   const seen = new Set(seedPaths);
@@ -184,21 +182,6 @@ server.registerTool(
           model,
         }),
       }],
-    };
-  },
-);
-
-server.registerTool(
-  "reindex",
-  {
-    description: "Index or refresh Markdown notes and their Obsidian wikilink graph.",
-    inputSchema: { clear: z.boolean().default(false), path_filter: z.string().optional() },
-  },
-  async ({ clear, path_filter }) => {
-    const result = await reindex(clear, path_filter);
-    return {
-      content: [{ type: "text", text: JSON.stringify(result) }],
-      ...(result.errors ? { isError: true } : {}),
     };
   },
 );

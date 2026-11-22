@@ -32,7 +32,7 @@ export type IndexerOptions = {
 
 const wikiRe = /\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]/g;
 
-/** Build a reindex function that can run inside the MCP server or directly from the CLI. */
+/** Build a reindex function used directly by the CLI index and watch commands. */
 export function createReindexer(options: IndexerOptions) {
   const { vault, store, embedder, maxChunk, minChunkCharacters } = options;
   const batchSize = options.batchSize ?? 16;

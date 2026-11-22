@@ -1,6 +1,6 @@
 # obsidian-rag-mcp
 
-TypeScript MCP server for semantic and graph-aware retrieval from Obsidian Markdown vaults. It is based on the sibling `obsidian-notes-rag` Python project and exposes the same core tools: `search_notes`, `get_similar`, `get_note_context`, `get_note_graph`, `get_stats`, and `reindex`.
+TypeScript MCP server for semantic and graph-aware retrieval from Obsidian Markdown vaults. It is based on the sibling `obsidian-notes-rag` Python project and exposes the core retrieval tools: `search_notes`, `get_similar`, `get_note_context`, `get_note_graph`, `get_stats`, and `remove_note`.
 
 ## Setup
 
@@ -94,11 +94,11 @@ For a protected llama-server, add `"api_key": "..."` inside the `llamacpp` objec
 
 Environment variables remain supported and override matching values in `config.json`. Set `OBSIDIAN_RAG_CONFIG` to use a config file at a custom location. Common overrides include `OBSIDIAN_RAG_VAULT`, `OBSIDIAN_RAG_PROVIDER`, `OBSIDIAN_RAG_MODEL`, `OBSIDIAN_RAG_OLLAMA_URL`, `OBSIDIAN_RAG_OLLAMA_API_KEY`, `OBSIDIAN_RAG_OLLAMA_MODEL`, `OBSIDIAN_RAG_LMSTUDIO_URL`, `OBSIDIAN_RAG_LMSTUDIO_API_KEY`, `OBSIDIAN_RAG_LMSTUDIO_MODEL`, `OBSIDIAN_RAG_LLAMACPP_URL`, and `OBSIDIAN_RAG_LLAMACPP_API_KEY`.
 
-The first index can be built with the CLI or by calling the MCP `reindex` tool. Chunks, metadata, links, and float32 embeddings are kept in `obsidian_notes.db` under the configured data directory. If `obsidian_notes.json` from an older version is present, it is imported into SQLite on first launch. Embedding requests are batched (up to 16 chunks per request) while indexing, including Ollama's `/api/embed` batch input. Searches stream stored vectors from SQLite and keep only the best matches in memory, so RAM use no longer grows with the entire embedding collection. Search uses exact cosine ranking over disk-backed rows; query time increases with corpus size. Chunk length defaults to 1,500 characters for other models; `nomic-embed-text-v2-moe` is capped at 512. The Python implementation's 1,500-token setting applies to v1 models with a larger context, not v2 moe. Short chunks are indexed by default; set `OBSIDIAN_RAG_MIN_CHARACTERS_PER_CHUNK` to raise the minimum length if desired.
+The first index is built with the CLI `index` command; indexing is intentionally not exposed as an MCP tool. Chunks, metadata, links, and float32 embeddings are kept in `obsidian_notes.db` under the configured data directory. If `obsidian_notes.json` from an older version is present, it is imported into SQLite on first launch. Embedding requests are batched (up to 16 chunks per request) while indexing, including Ollama's `/api/embed` batch input. Searches stream stored vectors from SQLite and keep only the best matches in memory, so RAM use no longer grows with the entire embedding collection. Search uses exact cosine ranking over disk-backed rows; query time increases with corpus size. Chunk length defaults to 1,500 characters for other models; `nomic-embed-text-v2-moe` is capped at 512. The Python implementation's 1,500-token setting applies to v1 models with a larger context, not v2 moe. Short chunks are indexed by default; set `OBSIDIAN_RAG_MIN_CHARACTERS_PER_CHUNK` to raise the minimum length if desired.
 
 ## Command line
 
-Build once, then use `obsidian-rag` from the project directory (or `npm run cli -- ...`). It uses the same MCP tools, vault configuration, embeddings provider, and index as the server:
+Build once, then use `obsidian-rag` from the project directory (or `npm run cli -- ...`). Search and note commands use the same MCP tools as the server, while `index` and `watch` call the indexer directly:
 
 ```powershell
 npm run build
@@ -116,7 +116,7 @@ Indexing 120 file(s)...
 Finished: 119/120 file(s) indexed, 431 chunk(s) created, 1 failed.
 ```
 
-The MCP `reindex` tool remains available for MCP clients. Clients indexing very large vaults through MCP may need to raise their request timeout.
+Indexing is available only through the CLI `index` and `watch` commands, so MCP clients cannot trigger reindexing. This avoids repeated indexing calls from agents and keeps large-vault runs free of MCP request timeouts.
 
 To add or refresh one file, pass its path relative to the vault. The file must be a Markdown file inside the vault:
 
@@ -152,7 +152,7 @@ node .\dist\cli.js watch
 node .\dist\cli.js watch --debounce 3
 ```
 
-The watcher waits two seconds after a change by default, then indexes that note. Duplicate filesystem events with unchanged file contents are ignored. It removes deleted notes and their link edges from the index. Stop it with Ctrl+C. It watches for changes after startup and does not perform a full initial reindex.
+The watcher waits two seconds after a change by default, then indexes that note directly through the indexer (no MCP server process is involved). Duplicate filesystem events with unchanged file contents are ignored. It removes deleted notes and their link edges from the index. Stop it with Ctrl+C. It watches for changes after startup and does not perform a full initial reindex.
 
 ### Run the watcher at login
 
@@ -202,4 +202,4 @@ Example MCP client configuration:
 }
 ```
 
-The server stores vectors in a local SQLite database and performs bounded-memory exact cosine search. It supports OpenAI-compatible embeddings, llama.cpp `llama-server`, Ollama's `/api/embed` endpoint, and LM Studio's `/v1/embeddings` endpoint (with batch indexing and Nomic/Qwen task prefixes). Configure indexing and search with MCP tools after connecting.
+The server stores vectors in a local SQLite database and performs bounded-memory exact cosine search. It supports OpenAI-compatible embeddings, llama.cpp `llama-server`, Ollama's `/api/embed` endpoint, and LM Studio's `/v1/embeddings` endpoint (with batch indexing and Nomic/Qwen task prefixes). Build and refresh the index with the CLI, then use the MCP retrieval tools after connecting.
